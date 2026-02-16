@@ -1,0 +1,38 @@
+# Standalone Isaac Sim Configuration
+physics:
+  dt: 0.016667  # 1/60 seconds
+  control_decimation: 12  # 12 physics steps per control step = 5 Hz
+
+robot:
+  usd_path: "/Isaac/Robots/Franka/franka_alt_fingers.usd"
+  prim_path: "/World/Franka"
+  default_joint_positions:
+    - 0.0     # joint 0
+    - -0.785  # joint 1
+    - 0.0     # joint 2
+    - -2.356  # joint 3
+    - 0.0     # joint 4
+    - 1.571   # joint 5
+    - 0.785   # joint 6
+    - 0.04    # finger left
+    - 0.04    # finger right
+  end_effector_frame: "panda_hand"
+
+camera:
+  prim_path: "/World/Camera"
+  resolution: [256, 256]
+  position: [0.5, 0.0, 1.2]    # overhead looking down
+  target: [0.5, 0.0, 0.5]      # look at table center
+
+scene:
+  table:
+    prim_path: "/World/Table"
+    position: [0.5, 0.0, 0.25]
+    size: [0.6, 0.8, 0.5]
+    color: [0.4, 0.3, 0.2]
+  cube:
+    prim_path: "/World/Cube"
+    position: [0.5, 0.0, 0.525]
+    size: 0.04
+    color: [0.9, 0.1, 0.1]
+    mass: 0.1

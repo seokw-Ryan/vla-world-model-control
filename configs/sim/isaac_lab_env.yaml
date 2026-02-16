@@ -1,0 +1,17 @@
+# Isaac Lab Environment Configuration
+env:
+  num_envs: 1
+  env_spacing: 2.5
+  episode_length_s: 40.0
+  decimation: 12  # control decimation (physics dt * decimation = control dt)
+
+camera:
+  resolution: [256, 256]
+  offset:
+    pos: [0.0, 0.0, 0.7]      # relative to robot base
+    rot: [0.0, 0.0, 0.0, 1.0] # wxyz quaternion, looking down
+  type: "tiled"                 # TiledCamera for batched rendering
+
+ik:
+  method: "dls"  # damped least squares
+  scale: 0.5     # action scale for IK deltas

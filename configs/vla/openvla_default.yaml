@@ -1,0 +1,18 @@
+# OpenVLA Model Configuration
+model:
+  path: "openvla/openvla-7b"
+  unnorm_key: "bridge_orig"
+  prompt_template: "In: {instruction}\nOut:"
+  dtype: "bfloat16"
+  load_in_4bit: true
+  image_size: 224
+
+action:
+  position_scale: 1.0
+  rotation_scale: 1.0
+  gripper_threshold: 0.5
+  gripper_open_value: 1.0
+  gripper_close_value: -1.0
+
+control:
+  frequency_hz: 5  # VLA inference rate
