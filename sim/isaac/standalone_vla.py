@@ -1,10 +1,11 @@
 """Standalone Isaac Sim script for closed-loop VLA control of a Franka Panda.
 
 Usage:
-    python sim/isaac/standalone_vla.py --headless --instruction "pick up the red cube"
-    python sim/isaac/standalone_vla.py --max_steps 100
+    <ISAAC_SIM>/python.sh sim/isaac/standalone_vla.py --headless --instruction "pick up the red cube"
+    <ISAAC_SIM>/python.sh sim/isaac/standalone_vla.py --max_steps 100
 
-IMPORTANT: SimulationApp must be created before any torch/omni imports.
+IMPORTANT: Must be run with Isaac Sim's python.sh.
+SimulationApp must be created before any torch/omni imports.
 """
 
 from __future__ import annotations
@@ -12,6 +13,13 @@ from __future__ import annotations
 import argparse
 import sys
 import os
+
+
+def log(msg: str) -> None:
+    """Write to stderr so output is visible even when Isaac Sim captures stdout."""
+    sys.stderr.write(f"{msg}\n")
+    sys.stderr.flush()
+
 
 # ─── Phase 1: Parse args (before SimulationApp) ─────────────────────────────
 
@@ -36,24 +44,16 @@ from isaacsim import SimulationApp
 
 simulation_app = SimulationApp({"headless": args.headless})
 
-# ─── Phase 3: Import everything else (omni, torch, project modules) ──────────
+# ─── Phase 3: Import everything else ────────────────────────────────────────
 
 import numpy as np
 import yaml
 from scipy.spatial.transform import Rotation
 
-from omni.isaac.core import World
-from omni.isaac.core.objects import DynamicCuboid, FixedCuboid
-from omni.isaac.core.prims import XFormPrim
-from omni.isaac.core.robots import Robot
-from omni.isaac.core.utils.stage import add_reference_to_stage
-from omni.isaac.core.utils.nucleus import get_assets_root_path
-from omni.isaac.sensor import Camera
-from omni.isaac.motion_generation import (
-    LulaKinematicsSolver,
-    ArticulationKinematicsSolver,
-    interface_config_loader,
-)
+from isaacsim.core.api import World
+from isaacsim.core.api.objects import DynamicCuboid, FixedCuboid
+from isaacsim.sensors.camera import Camera
+from isaacsim.robot.manipulators.examples.franka import Franka, KinematicsSolver
 
 # Add project root to path for imports
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -89,7 +89,6 @@ vla_config = OpenVLAConfig(
 )
 
 physics_cfg = sim_cfg.get("physics", {})
-robot_cfg = sim_cfg.get("robot", {})
 camera_cfg = sim_cfg.get("camera", {})
 scene_cfg = sim_cfg.get("scene", {})
 
@@ -103,13 +102,9 @@ world = World(physics_dt=PHYSICS_DT, stage_units_in_meters=1.0)
 # Ground plane
 world.scene.add_default_ground_plane()
 
-# Franka robot
-assets_root = get_assets_root_path()
-robot_usd = assets_root + robot_cfg.get("usd_path", "/Isaac/Robots/Franka/franka_alt_fingers.usd")
-robot_prim_path = robot_cfg.get("prim_path", "/World/Franka")
-add_reference_to_stage(usd_path=robot_usd, prim_path=robot_prim_path)
+# Franka robot (auto-resolves correct USD path for Isaac Sim 5.x)
 franka = world.scene.add(
-    Robot(prim_path=robot_prim_path, name="franka")
+    Franka(prim_path="/World/Franka", name="franka")
 )
 
 # Table
@@ -163,9 +158,12 @@ camera.set_focal_length(1.5)
 # Point camera at table (compute look-at orientation)
 cam_forward = np.array(cam_target) - np.array(cam_pos)
 cam_forward = cam_forward / np.linalg.norm(cam_forward)
-cam_up = np.array([0.0, 0.0, 1.0])
-cam_right = np.cross(cam_forward, cam_up)
-cam_right = cam_right / (np.linalg.norm(cam_right) + 1e-8)
+# Use world Y as up hint when looking straight down (forward ~parallel to Z)
+world_up = np.array([0.0, 0.0, 1.0])
+if abs(np.dot(cam_forward, world_up)) > 0.99:
+    world_up = np.array([0.0, 1.0, 0.0])
+cam_right = np.cross(cam_forward, world_up)
+cam_right = cam_right / np.linalg.norm(cam_right)
 cam_up = np.cross(cam_right, cam_forward)
 rot_matrix = np.stack([cam_right, cam_up, -cam_forward], axis=1)
 cam_rot = Rotation.from_matrix(rot_matrix)
@@ -174,10 +172,7 @@ cam_quat_wxyz = np.array([cam_quat_xyzw[3], cam_quat_xyzw[0], cam_quat_xyzw[1], 
 camera.set_world_pose(position=np.array(cam_pos), orientation=cam_quat_wxyz)
 
 # Set default joint positions
-default_joints = robot_cfg.get(
-    "default_joint_positions",
-    [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.04, 0.04],
-)
+default_joints = [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.04, 0.04]
 franka.set_joint_positions(np.array(default_joints, dtype=np.float32))
 
 # Step a few times to let physics settle
@@ -186,71 +181,67 @@ for _ in range(10):
 
 # ─── Phase 7: Setup IK solver ───────────────────────────────────────────────
 
-kinematics_config = interface_config_loader.load_supported_lula_kinematics_solver_config(
-    "Franka"
-)
-kine_solver = LulaKinematicsSolver(**kinematics_config)
-art_kine_solver = ArticulationKinematicsSolver(
-    robot_articulation=franka,
-    kinematics_solver=kine_solver,
-    end_effector_frame_name=robot_cfg.get("end_effector_frame", "panda_hand"),
-)
+ik_solver = KinematicsSolver(franka)
+articulation_controller = franka.get_articulation_controller()
 
 # ─── Phase 8: Load VLA model ────────────────────────────────────────────────
 
-vla = OpenVLAWrapper(vla_config).load()
+try:
+    vla = OpenVLAWrapper(vla_config).load()
+    log("[Standalone] VLA model loaded.")
+except Exception as e:
+    log(f"[Standalone] VLA load FAILED: {type(e).__name__}: {e}")
+    import traceback
+    traceback.print_exc(file=sys.stderr)
+    world.stop()
+    simulation_app.close()
+    sys.exit(1)
 
 # ─── Phase 9: Warm-up (camera may return None on first frames) ──────────────
 
-print("[Standalone] Warming up camera...")
+log("[Standalone] Warming up camera...")
 for i in range(20):
     world.step(render=True)
     rgba = camera.get_rgba()
     if rgba is not None:
-        print(f"[Standalone] Camera ready after {i + 1} warm-up steps.")
+        log(f"[Standalone] Camera ready after {i + 1} warm-up steps.")
         break
 else:
-    print("[Standalone] WARNING: Camera did not return data during warm-up.")
+    log("[Standalone] WARNING: Camera did not return data during warm-up.")
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 
 def apply_delta_rotation(
-    current_quat_wxyz: np.ndarray, delta_euler: np.ndarray
+    current_rot_matrix: np.ndarray, delta_euler: np.ndarray
 ) -> np.ndarray:
-    """Apply euler angle delta to a quaternion.
+    """Apply euler angle delta to a rotation matrix.
 
     Args:
-        current_quat_wxyz: Current orientation as (w, x, y, z) quaternion (Isaac Sim convention).
+        current_rot_matrix: Current orientation as (3, 3) rotation matrix
+            (from KinematicsSolver.compute_end_effector_pose).
         delta_euler: Delta rotation as (rx, ry, rz) euler angles in radians.
 
     Returns:
-        New orientation as (w, x, y, z) quaternion.
+        New orientation as (w, x, y, z) quaternion (Isaac Sim convention).
     """
-    # Isaac Sim uses (w, x, y, z), scipy uses (x, y, z, w)
-    current_xyzw = np.array([
-        current_quat_wxyz[1], current_quat_wxyz[2],
-        current_quat_wxyz[3], current_quat_wxyz[0],
-    ])
-    current_rot = Rotation.from_quat(current_xyzw)
+    current_rot = Rotation.from_matrix(current_rot_matrix)
     delta_rot = Rotation.from_euler("xyz", delta_euler)
     new_rot = delta_rot * current_rot
     new_xyzw = new_rot.as_quat()
-    # Convert back to (w, x, y, z)
     return np.array([new_xyzw[3], new_xyzw[0], new_xyzw[1], new_xyzw[2]])
 
 
 # ─── Phase 10: Control loop ─────────────────────────────────────────────────
 
-print(f"[Standalone] Starting control loop: instruction='{args.instruction}', "
-      f"max_steps={args.max_steps}")
+log(f"[Standalone] Starting control loop: instruction='{args.instruction}', "
+    f"max_steps={args.max_steps}")
 
 for step in range(args.max_steps):
     # 1. Capture camera image
     rgba = camera.get_rgba()
     if rgba is None:
-        print(f"[Step {step}] Camera returned None, stepping physics...")
         world.step(render=True)
         continue
     rgb = (rgba[:, :, :3] * 255).astype(np.uint8) if rgba.max() <= 1.0 else rgba[:, :, :3].astype(np.uint8)
@@ -258,45 +249,44 @@ for step in range(args.max_steps):
     # 2. VLA inference
     action = vla.predict(rgb, args.instruction)
 
-    # 3. Get current EE pose
-    ee_pos, ee_quat_wxyz = art_kine_solver.get_end_effector_pose()
+    # 3. Get current EE pose (rotation is a 3x3 matrix in 5.x)
+    ee_pos, ee_rot_matrix = ik_solver.compute_end_effector_pose()
 
     # 4. Compute target EE pose (apply deltas)
     target_pos = ee_pos + action.delta_pos
-    target_quat = apply_delta_rotation(ee_quat_wxyz, action.delta_rot)
+    target_quat = apply_delta_rotation(ee_rot_matrix, action.delta_rot)
 
-    # 5. Solve IK for target pose
-    joint_targets, success = art_kine_solver.compute_inverse_kinematics(
+    # 5. Solve IK for target pose (returns ArticulationAction with 7 arm joints)
+    ik_result, success = ik_solver.compute_inverse_kinematics(
         target_position=target_pos, target_orientation=target_quat
     )
 
     if success:
-        # 6. Set arm joint targets (first 7 joints)
-        arm_targets = joint_targets[:7]
-        # 7. Set gripper targets (joints 7, 8)
+        # 6. Build full joint targets: 7 arm joints from IK + 2 gripper joints
+        arm_positions = np.array(ik_result.joint_positions, dtype=np.float32)
         gripper_val = 0.04 if action.gripper > 0.5 else 0.0
-        full_targets = np.concatenate([arm_targets, [gripper_val, gripper_val]])
-        franka.set_joint_positions(full_targets)
+        full_positions = np.concatenate([arm_positions, [gripper_val, gripper_val]])
+        franka.set_joint_positions(full_positions)
     else:
-        print(f"[Step {step}] IK solve failed, skipping action.")
+        log(f"[Step {step}] IK solve failed, skipping action.")
 
-    # 8. Step simulation (control decimation)
+    # 7. Step simulation (control decimation)
     for _ in range(CONTROL_DECIMATION):
         world.step(render=True)
 
-    # 9. Print step info
+    # 8. Log step info
     if step % 10 == 0:
-        print(f"[Step {step}] pos_delta={action.delta_pos}, "
-              f"gripper={'open' if action.gripper > 0.5 else 'closed'}, "
-              f"ee_pos={ee_pos}")
+        log(f"[Step {step}] pos_delta={action.delta_pos}, "
+            f"gripper={'open' if action.gripper > 0.5 else 'closed'}, "
+            f"ee_pos={ee_pos}")
 
     if simulation_app.is_running() is False:
-        print("[Standalone] SimulationApp closed by user.")
+        log("[Standalone] SimulationApp closed by user.")
         break
 
 # ─── Phase 11: Shutdown ─────────────────────────────────────────────────────
 
-print("[Standalone] Shutting down...")
+log("[Standalone] Shutting down...")
 world.stop()
 simulation_app.close()
-print("[Standalone] Done.")
+log("[Standalone] Done.")
