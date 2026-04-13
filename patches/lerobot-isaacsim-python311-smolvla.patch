@@ -1,0 +1,179 @@
+diff --git a/src/lerobot/datasets/streaming_dataset.py b/src/lerobot/datasets/streaming_dataset.py
+index 1767cc79..efc7aa44 100644
+--- a/src/lerobot/datasets/streaming_dataset.py
++++ b/src/lerobot/datasets/streaming_dataset.py
+@@ -16,6 +16,7 @@
+ from collections import deque
+ from collections.abc import Callable, Generator, Iterable, Iterator
+ from pathlib import Path
++from typing import Generic, TypeVar
+ 
+ import datasets
+ import numpy as np
+@@ -54,7 +55,10 @@ class LookAheadError(Exception):
+     pass
+ 
+ 
+-class Backtrackable[T]:
++T = TypeVar("T")
++
++
++class Backtrackable(Generic[T]):
+     """
+     Wrap any iterator/iterable so you can step back up to `history` items
+     and look ahead up to `lookahead` items.
+diff --git a/src/lerobot/motors/motors_bus.py b/src/lerobot/motors/motors_bus.py
+index 509f5e95..52cd2830 100644
+--- a/src/lerobot/motors/motors_bus.py
++++ b/src/lerobot/motors/motors_bus.py
+@@ -38,8 +38,8 @@ from tqdm import tqdm
+ from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
+ from lerobot.utils.utils import enter_pressed, move_cursor_up
+ 
+-type NameOrID = str | int
+-type Value = int | float
++NameOrID = str | int
++Value = int | float
+ 
+ logger = logging.getLogger(__name__)
+ 
+diff --git a/src/lerobot/policies/__init__.py b/src/lerobot/policies/__init__.py
+index 55ce09cf..49553d97 100644
+--- a/src/lerobot/policies/__init__.py
++++ b/src/lerobot/policies/__init__.py
+@@ -12,19 +12,63 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
+-from .act.configuration_act import ACTConfig as ACTConfig
+-from .diffusion.configuration_diffusion import DiffusionConfig as DiffusionConfig
+-from .groot.configuration_groot import GrootConfig as GrootConfig
+-from .multi_task_dit.configuration_multi_task_dit import MultiTaskDiTConfig as MultiTaskDiTConfig
+-from .pi0.configuration_pi0 import PI0Config as PI0Config
+-from .pi0_fast.configuration_pi0_fast import PI0FastConfig as PI0FastConfig
+-from .pi05.configuration_pi05 import PI05Config as PI05Config
++try:
++    from .act.configuration_act import ACTConfig as ACTConfig
++except Exception:  # pragma: no cover - optional at import time
++    ACTConfig = None
++
++try:
++    from .diffusion.configuration_diffusion import DiffusionConfig as DiffusionConfig
++except Exception:  # pragma: no cover - optional at import time
++    DiffusionConfig = None
++
++try:
++    from .groot.configuration_groot import GrootConfig as GrootConfig
++except Exception:  # pragma: no cover - optional at import time
++    GrootConfig = None
++
++try:
++    from .multi_task_dit.configuration_multi_task_dit import MultiTaskDiTConfig as MultiTaskDiTConfig
++except Exception:  # pragma: no cover - optional at import time
++    MultiTaskDiTConfig = None
++
+ from .smolvla.configuration_smolvla import SmolVLAConfig as SmolVLAConfig
+ from .smolvla.processor_smolvla import SmolVLANewLineProcessor
+-from .tdmpc.configuration_tdmpc import TDMPCConfig as TDMPCConfig
+-from .vqbet.configuration_vqbet import VQBeTConfig as VQBeTConfig
+-from .wall_x.configuration_wall_x import WallXConfig as WallXConfig
+-from .xvla.configuration_xvla import XVLAConfig as XVLAConfig
++
++try:
++    from .tdmpc.configuration_tdmpc import TDMPCConfig as TDMPCConfig
++except Exception:  # pragma: no cover - optional at import time
++    TDMPCConfig = None
++
++try:
++    from .vqbet.configuration_vqbet import VQBeTConfig as VQBeTConfig
++except Exception:  # pragma: no cover - optional at import time
++    VQBeTConfig = None
++
++try:
++    from .wall_x.configuration_wall_x import WallXConfig as WallXConfig
++except Exception:  # pragma: no cover - optional at import time
++    WallXConfig = None
++
++try:
++    from .xvla.configuration_xvla import XVLAConfig as XVLAConfig
++except Exception:  # pragma: no cover - optional at import time
++    XVLAConfig = None
++
++try:
++    from .pi0.configuration_pi0 import PI0Config as PI0Config
++except Exception:  # pragma: no cover - optional at import time
++    PI0Config = None
++
++try:
++    from .pi0_fast.configuration_pi0_fast import PI0FastConfig as PI0FastConfig
++except Exception:  # pragma: no cover - optional at import time
++    PI0FastConfig = None
++
++try:
++    from .pi05.configuration_pi05 import PI05Config as PI05Config
++except Exception:  # pragma: no cover - optional at import time
++    PI05Config = None
+ 
+ __all__ = [
+     "ACTConfig",
+diff --git a/src/lerobot/policies/smolvla/smolvlm_with_expert.py b/src/lerobot/policies/smolvla/smolvlm_with_expert.py
+index caca41da..35ad6879 100644
+--- a/src/lerobot/policies/smolvla/smolvlm_with_expert.py
++++ b/src/lerobot/policies/smolvla/smolvlm_with_expert.py
+@@ -536,6 +536,8 @@ class SmolVLMWithExpertModel(nn.Module):
+ 
+         att_weights = att_weights.to(dtype=torch.float32)
+         big_neg = torch.finfo(att_weights.dtype).min  # -2.3819763e38  # See gemma/modules.py
++        if attention_mask.dtype is not torch.bool:
++            attention_mask = attention_mask.to(dtype=torch.bool)
+         masked_att_weights = torch.where(attention_mask[:, None, :, :], att_weights, big_neg)
+         probs = nn.functional.softmax(masked_att_weights, dim=-1)
+         probs = probs.to(dtype=value_states.dtype)
+diff --git a/src/lerobot/processor/pipeline.py b/src/lerobot/processor/pipeline.py
+index abfb3142..31c9895a 100644
+--- a/src/lerobot/processor/pipeline.py
++++ b/src/lerobot/processor/pipeline.py
+@@ -39,7 +39,7 @@ from collections.abc import Callable, Iterable, Sequence
+ from copy import deepcopy
+ from dataclasses import dataclass, field
+ from pathlib import Path
+-from typing import Any, TypedDict, TypeVar, cast
++from typing import Any, Generic, TypedDict, TypeVar, cast
+ 
+ import torch
+ from huggingface_hub import hf_hub_download
+@@ -251,7 +251,7 @@ class ProcessorMigrationError(Exception):
+ 
+ 
+ @dataclass
+-class DataProcessorPipeline[TInput, TOutput](HubMixin):
++class DataProcessorPipeline(HubMixin, Generic[TInput, TOutput]):
+     """A sequential pipeline for processing data, integrated with the Hugging Face Hub.
+ 
+     This class chains together multiple `ProcessorStep` instances to form a complete
+diff --git a/src/lerobot/utils/io_utils.py b/src/lerobot/utils/io_utils.py
+index d70ea8b6..3ce20657 100644
+--- a/src/lerobot/utils/io_utils.py
++++ b/src/lerobot/utils/io_utils.py
+@@ -16,10 +16,12 @@
+ import json
+ import warnings
+ from pathlib import Path
++from typing import TypeVar
+ 
+ import imageio
+ 
+ JsonLike = str | int | float | bool | None | list["JsonLike"] | dict[str, "JsonLike"] | tuple["JsonLike", ...]
++TJsonLike = TypeVar("TJsonLike")
+ 
+ 
+ def write_video(video_path, stacked_frames, fps):
+@@ -31,7 +33,7 @@ def write_video(video_path, stacked_frames, fps):
+         imageio.mimsave(video_path, stacked_frames, fps=fps)
+ 
+ 
+-def deserialize_json_into_object[T: JsonLike](fpath: Path, obj: T) -> T:
++def deserialize_json_into_object(fpath: Path, obj: TJsonLike) -> TJsonLike:
+     """
+     Loads the JSON data from `fpath` and recursively fills `obj` with the
+     corresponding values (strictly matching structure and types).

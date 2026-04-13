@@ -1,0 +1,9 @@
+# LeRobot integration dependencies.
+# Install into Isaac Sim's Python env:
+#   <ISAAC_SIM>/python.sh -m pip install -r requirements-lerobot.txt
+
+lerobot>=0.4.4
+gymnasium>=0.29.0
+numpy<2.0  # Isaac Sim 5.x requires numpy 1.x
+scipy
+pyyaml

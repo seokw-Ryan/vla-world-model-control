@@ -1,0 +1,48 @@
+# SO-100 Standalone Isaac Sim Configuration
+physics:
+  dt: 0.016667  # 1/60 seconds
+  control_decimation: 12  # 12 physics steps per control step = 5 Hz
+
+robot:
+  type: so100
+  urdf_path: "assets/so100/so100.urdf"
+  usd_path: "assets/so100/so100.usd"
+  prim_path: "/World/SO100"
+  # Joint names in URDF order
+  joint_names:
+    - shoulder_pan
+    - shoulder_lift
+    - elbow_flex
+    - wrist_flex
+    - wrist_roll
+    - gripper
+  # Default joint positions (radians) — neutral pose
+  default_joint_positions: [0.0, 1.0, -1.0, -0.5, 0.0, 0.5]
+  # Base link sits on top of a thin tabletop
+  position: [0.0, 0.0, 0.40]
+  orientation: [1.0, 0.0, 0.0, 0.0]  # wxyz, identity
+
+camera:
+  prim_path: "/World/Camera"
+  resolution: [256, 256]
+  position: [0.25, 0.25, 0.9]  # angled overhead (SO-100 workspace is smaller)
+  target: [0.15, 0.0, 0.45]   # look at the robot workspace on the tabletop
+
+scene:
+  table:
+    enabled: true
+    prim_path: "/World/Table"
+    position: [0.12, 0.0, 0.38]
+    size: [0.70, 0.60, 0.04]
+    color: [0.4, 0.3, 0.2]
+  cube:
+    prim_path: "/World/Cube"
+    position: [0.15, 0.0, 0.415]  # cube resting on the tabletop
+    size: 0.03  # slightly smaller cube for smaller arm
+    color: [0.9, 0.1, 0.1]
+    mass: 0.05
+    lift_height: 0.48
+    spawn:
+      radius: [0.10, 0.22]
+      angle_deg: [-90.0, 90.0]
+      z: 0.415
