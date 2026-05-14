@@ -17,9 +17,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import random
-import sys
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -47,32 +47,57 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gripper_noise_prob", type=float, default=0.05)
     parser.add_argument("--success_bonus", type=float, default=10.0)
     parser.add_argument("--lift_weight", type=float, default=10.0)
+    parser.add_argument(
+        "--camera_eye",
+        type=float,
+        nargs=3,
+        default=None,
+        help="Optional camera eye override. When omitted, use configs/sim/so100_standalone.yaml.",
+    )
+    parser.add_argument(
+        "--camera_target",
+        type=float,
+        nargs=3,
+        default=None,
+        help="Optional camera target override. When omitted, use configs/sim/so100_standalone.yaml.",
+    )
+    parser.add_argument("--camera_width", type=int, default=640)
+    parser.add_argument("--camera_height", type=int, default=480)
+    parser.add_argument("--camera_focal_length", type=float, default=1.5)
+    parser.add_argument("--default_joint_positions", type=float, nargs=6, default=None)
     parser.add_argument("--checkpoint_dir", type=str, default=None)
     parser.add_argument("--checkpoint_freq", type=int, default=25)
     parser.add_argument("--log_freq", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--trace_steps",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write a per-step JSONL trace with observations, actions, rewards, and terminations.",
+    )
+    parser.add_argument(
+        "--trace_image_interval",
+        type=int,
+        default=0,
+        help="Save the policy input image every N steps to the trace directory. Disabled when 0.",
+    )
     return parser.parse_args()
 
 
 args = parse_args()
 
-from isaacsim import SimulationApp  # noqa: E402
+from isaaclab.app import AppLauncher  # noqa: E402
 
-simulation_app = SimulationApp({"headless": args.headless})  # noqa: E402
+simulation_app = AppLauncher(headless=args.headless, enable_cameras=True).app  # noqa: E402
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from torch.utils.tensorboard import SummaryWriter  # noqa: E402
 from transformers import AutoProcessor  # noqa: E402
 
+from isaaclab_arena_vla.utils import PROJECT_ROOT, add_lerobot_import_paths_to_sys_path, stderr_log as log
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-LEROBOT_SRC = PROJECT_ROOT / "lerobot" / "src"
-
-for path in (PROJECT_ROOT, LEROBOT_SRC):
-    path_str = str(path)
-    if path_str not in sys.path:
-        sys.path.insert(0, path_str)
+add_lerobot_import_paths_to_sys_path()
 
 from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature  # noqa: E402
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig  # noqa: E402
@@ -81,9 +106,32 @@ from lerobot.utils.constants import ACTION, OBS_LANGUAGE_ATTENTION_MASK, OBS_LAN
 from sim.isaac.so100_gym_wrapper import IsaacSO100Env  # noqa: E402
 
 
-def log(msg: str) -> None:
-    sys.stderr.write(f"{msg}\n")
-    sys.stderr.flush()
+def summarize_image(image: np.ndarray) -> dict[str, object]:
+    return {
+        "shape": list(image.shape),
+        "dtype": str(image.dtype),
+        "min": int(image.min()),
+        "max": int(image.max()),
+        "mean": float(image.mean()),
+    }
+
+
+def maybe_save_trace_image(image: np.ndarray, image_dir: Path | None, episode: int, step_idx: int) -> str | None:
+    if image_dir is None:
+        return None
+    import cv2
+
+    image_dir.mkdir(parents=True, exist_ok=True)
+    image_hwc = np.transpose(image, (1, 2, 0))
+    image_bgr = cv2.cvtColor(image_hwc, cv2.COLOR_RGB2BGR)
+    image_path = image_dir / f"ep{episode:05d}_step{step_idx:04d}.png"
+    cv2.imwrite(str(image_path), image_bgr)
+    return str(image_path)
+
+
+def write_trace_line(trace_file, payload: dict[str, object]) -> None:
+    trace_file.write(json.dumps(payload) + "\n")
+    trace_file.flush()
 
 
 @dataclass
@@ -122,7 +170,10 @@ def make_policy_config(device: str) -> SmolVLAConfig:
         },
         input_features={
             OBS_STATE: PolicyFeature(type=FeatureType.STATE, shape=(6,)),
-            args.image_key: PolicyFeature(type=FeatureType.VISUAL, shape=(3, 256, 256)),
+            args.image_key: PolicyFeature(
+                type=FeatureType.VISUAL,
+                shape=(3, args.camera_height, args.camera_width),
+            ),
         },
         output_features={
             ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(6,)),
@@ -243,8 +294,20 @@ def main() -> None:
 
     checkpoint_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else log_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    trace_path = log_dir / "step_trace.jsonl"
+    trace_image_dir = log_dir / "step_images" if args.trace_image_interval > 0 else None
 
     writer = SummaryWriter(log_dir=str(log_dir))
+    log(
+        "[SmolVLA-RL] Camera config: "
+        f"eye={tuple(args.camera_eye) if args.camera_eye is not None else 'from sim config'} "
+        f"target={tuple(args.camera_target) if args.camera_target is not None else 'from sim config'} "
+        f"resolution={args.camera_width}x{args.camera_height}"
+    )
+    if args.trace_steps:
+        log(f"[SmolVLA-RL] Step trace: {trace_path}")
+        if trace_image_dir is not None:
+            log(f"[SmolVLA-RL] Step images: {trace_image_dir}")
     tokenizer = AutoProcessor.from_pretrained("HuggingFaceTB/SmolVLM2-500M-Video-Instruct").tokenizer
     task_text = args.instruction if args.instruction.endswith("\n") else f"{args.instruction}\n"
     task_tokens = tokenizer(
@@ -264,12 +327,21 @@ def main() -> None:
     )["attention_mask"].to(device=device, dtype=torch.bool)
 
     env = None
+    trace_file = None
     try:
+        if args.trace_steps:
+            trace_file = trace_path.open("a", encoding="utf-8")
         env = IsaacSO100Env(
             simulation_app=simulation_app,
             sim_config_path=str(PROJECT_ROOT / args.sim_config),
+            image_height=args.camera_height,
+            image_width=args.camera_width,
             max_episode_steps=args.max_steps,
             cube_randomize=True,
+            camera_position=tuple(args.camera_eye) if args.camera_eye is not None else None,
+            camera_target=tuple(args.camera_target) if args.camera_target is not None else None,
+            camera_focal_length=args.camera_focal_length,
+            default_joint_positions=list(args.default_joint_positions) if args.default_joint_positions is not None else None,
         )
         cube_rest_height = env.cube_rest_height
 
@@ -299,15 +371,40 @@ def main() -> None:
                 batch = build_single_batch(obs, task_tokens, task_mask, device)
                 with torch.inference_mode():
                     action_tensor = policy.select_action(batch)
-                action = action_tensor.squeeze(0).detach().cpu().numpy().astype(np.float32)
-                action = add_exploration_noise(action)
+                policy_action = action_tensor.squeeze(0).detach().cpu().numpy().astype(np.float32)
+                action = add_exploration_noise(policy_action)
 
                 next_obs, env_reward, terminated, truncated, info = env.step(action)
+                step_success = bool(info.get("is_success", False))
                 dense_reward = float(env_reward) + compute_dense_reward(
                     info, args.success_bonus, args.lift_weight, cube_rest_height
                 )
                 episode_return += dense_reward
                 max_cube_height = max(max_cube_height, float(info["cube_pos"][2]))
+
+                if trace_file is not None:
+                    image_path = None
+                    if args.trace_image_interval > 0 and (step_idx % args.trace_image_interval == 0):
+                        image_path = maybe_save_trace_image(obs[args.image_key], trace_image_dir, episode, step_idx)
+                    write_trace_line(
+                        trace_file,
+                        {
+                            "episode": episode,
+                            "step": step_idx,
+                            "task": args.instruction,
+                            "state": obs[args.state_key].astype(float).tolist(),
+                            "image": summarize_image(obs[args.image_key]),
+                            "image_path": image_path,
+                            "policy_action": policy_action.astype(float).tolist(),
+                            "executed_action": action.astype(float).tolist(),
+                            "env_reward": float(env_reward),
+                            "dense_reward": float(dense_reward),
+                            "success": step_success,
+                            "terminated": bool(terminated),
+                            "truncated": bool(truncated),
+                            "cube_pos": np.asarray(info["cube_pos"], dtype=np.float32).astype(float).tolist(),
+                        },
+                    )
 
                 episode_transitions.append(
                     Transition(
@@ -322,8 +419,13 @@ def main() -> None:
                 obs = next_obs
                 global_step += 1
 
-                if terminated:
+                # In this task, success is explicitly defined as lifting the red cube high enough.
+                # Drive the trainer's success bookkeeping from the env's is_success flag instead of
+                # assuming every termination reason is a successful pickup.
+                if step_success:
                     episode_success = True
+                    break
+                if terminated:
                     break
                 if truncated:
                     break
@@ -389,6 +491,8 @@ def main() -> None:
         log(f"[SmolVLA-RL] TensorBoard logdir: {log_dir}")
     finally:
         writer.close()
+        if trace_file is not None:
+            trace_file.close()
         if env is not None:
             env.close()
         simulation_app.close()

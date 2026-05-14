@@ -11,14 +11,13 @@ SimulationApp must be created before any torch/omni imports.
 from __future__ import annotations
 
 import argparse
-import sys
-import os
 
-
-def log(msg: str) -> None:
-    """Write to stderr so output is visible even when Isaac Sim captures stdout."""
-    sys.stderr.write(f"{msg}\n")
-    sys.stderr.flush()
+from isaaclab_arena_vla.utils import (
+    add_project_root_to_sys_path,
+    build_openvla_config,
+    load_yaml,
+    stderr_log as log,
+)
 
 
 # ─── Phase 1: Parse args (before SimulationApp) ─────────────────────────────
@@ -47,7 +46,6 @@ simulation_app = SimulationApp({"headless": args.headless})
 # ─── Phase 3: Import everything else ────────────────────────────────────────
 
 import numpy as np
-import yaml
 from scipy.spatial.transform import Rotation
 
 from isaacsim.core.api import World
@@ -55,38 +53,13 @@ from isaacsim.core.api.objects import DynamicCuboid, FixedCuboid
 from isaacsim.sensors.camera import Camera
 from isaacsim.robot.manipulators.examples.franka import Franka, KinematicsSolver
 
-# Add project root to path for imports
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
-
-from src.models.vla import OpenVLAConfig, OpenVLAWrapper
+project_root = add_project_root_to_sys_path()
+from src.models.vla import OpenVLAWrapper
 
 # ─── Phase 4: Load configs ──────────────────────────────────────────────────
 
-
-def load_yaml(path: str) -> dict:
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
-
-
-vla_cfg = load_yaml(args.vla_config)
 sim_cfg = load_yaml(args.sim_config)
-
-# Build OpenVLAConfig from YAML
-model_cfg = vla_cfg.get("model", {})
-action_cfg = vla_cfg.get("action", {})
-vla_config = OpenVLAConfig(
-    model_path=args.model_path or model_cfg.get("path", "openvla/openvla-7b"),
-    unnorm_key=model_cfg.get("unnorm_key", "bridge_orig"),
-    prompt_template=model_cfg.get("prompt_template", "In: {instruction}\nOut:"),
-    image_size=model_cfg.get("image_size", 224),
-    dtype=model_cfg.get("dtype", "bfloat16"),
-    load_in_4bit=model_cfg.get("load_in_4bit", True),
-    position_scale=action_cfg.get("position_scale", 1.0),
-    rotation_scale=action_cfg.get("rotation_scale", 1.0),
-    gripper_threshold=action_cfg.get("gripper_threshold", 0.5),
-)
+vla_config = build_openvla_config(args.vla_config, model_path=args.model_path)
 
 physics_cfg = sim_cfg.get("physics", {})
 camera_cfg = sim_cfg.get("camera", {})

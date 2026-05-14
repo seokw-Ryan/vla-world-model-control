@@ -11,8 +11,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import sys
-import os
 
 # ─── Phase 1: Parse args (AppLauncher pattern — args before everything) ──────
 
@@ -37,41 +35,17 @@ simulation_app = app_launcher.app
 
 import numpy as np
 import torch
-import yaml
 
 from omni.isaac.lab.envs import ManagerBasedRLEnv
 
-# Add project root to path
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
+from isaaclab_arena_vla.utils import add_project_root_to_sys_path, build_openvla_config
 
-from src.models.vla import OpenVLAConfig, OpenVLAWrapper
+project_root = add_project_root_to_sys_path()
+from src.models.vla import OpenVLAWrapper
 from sim.isaac.lab_env.franka_vla_env_cfg import FrankaVLAEnvCfg
 
 # ─── Phase 4: Load VLA config ───────────────────────────────────────────────
-
-
-def load_yaml(path: str) -> dict:
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
-
-
-vla_yaml = load_yaml(args.vla_config)
-model_cfg = vla_yaml.get("model", {})
-action_cfg = vla_yaml.get("action", {})
-
-vla_config = OpenVLAConfig(
-    model_path=args.model_path or model_cfg.get("path", "openvla/openvla-7b"),
-    unnorm_key=model_cfg.get("unnorm_key", "bridge_orig"),
-    prompt_template=model_cfg.get("prompt_template", "In: {instruction}\nOut:"),
-    image_size=model_cfg.get("image_size", 224),
-    dtype=model_cfg.get("dtype", "bfloat16"),
-    load_in_4bit=model_cfg.get("load_in_4bit", True),
-    position_scale=action_cfg.get("position_scale", 1.0),
-    rotation_scale=action_cfg.get("rotation_scale", 1.0),
-    gripper_threshold=action_cfg.get("gripper_threshold", 0.5),
-)
+vla_config = build_openvla_config(args.vla_config, model_path=args.model_path)
 
 # ─── Phase 5: Create environment ────────────────────────────────────────────
 

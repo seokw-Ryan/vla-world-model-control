@@ -11,14 +11,13 @@ SimulationApp must be created before any torch/omni imports.
 from __future__ import annotations
 
 import argparse
-import sys
-import os
 
-
-def log(msg: str) -> None:
-    """Write to stderr so output is visible even when Isaac Sim captures stdout."""
-    sys.stderr.write(f"{msg}\n")
-    sys.stderr.flush()
+from isaaclab_arena_vla.utils import (
+    add_project_root_to_sys_path,
+    build_openvla_config,
+    load_yaml,
+    stderr_log as log,
+)
 
 
 # ─── Phase 1: Parse args (before SimulationApp) ─────────────────────────────
@@ -47,7 +46,7 @@ simulation_app = SimulationApp({"headless": args.headless})
 # ─── Phase 3: Import everything else ────────────────────────────────────────
 
 import numpy as np
-import yaml
+from pxr import Gf, UsdGeom
 from scipy.spatial.transform import Rotation
 
 from isaacsim.core.api import World
@@ -58,38 +57,34 @@ from isaacsim.asset.importer.urdf import _urdf
 
 import omni.kit.commands
 
-# Add project root to path for imports
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
-
-from src.models.vla import OpenVLAConfig, OpenVLAWrapper
+project_root = add_project_root_to_sys_path()
+from src.models.vla import OpenVLAWrapper
 
 # ─── Phase 4: Load configs ──────────────────────────────────────────────────
 
 
-def load_yaml(path: str) -> dict:
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
+def author_root_pose(stage, prim_path: str, position: np.ndarray, orientation_wxyz: np.ndarray) -> None:
+    """Write the imported robot prim's root xform so the Stage UI matches runtime placement."""
+    prim = stage.GetPrimAtPath(prim_path)
+    xform = UsdGeom.Xformable(prim)
+    xform.ClearXformOpOrder()
+    xform.AddTranslateOp(precision=UsdGeom.XformOp.PrecisionDouble).Set(
+        Gf.Vec3d(*[float(v) for v in position.tolist()])
+    )
+    xform.AddOrientOp(precision=UsdGeom.XformOp.PrecisionDouble).Set(
+        Gf.Quatd(
+            float(orientation_wxyz[0]),
+            Gf.Vec3d(
+                float(orientation_wxyz[1]),
+                float(orientation_wxyz[2]),
+                float(orientation_wxyz[3]),
+            ),
+        )
+    )
+    xform.AddScaleOp(precision=UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(1.0, 1.0, 1.0))
 
-
-vla_cfg = load_yaml(args.vla_config)
 sim_cfg = load_yaml(args.sim_config)
-
-# Build OpenVLAConfig from YAML
-model_cfg = vla_cfg.get("model", {})
-action_cfg = vla_cfg.get("action", {})
-vla_config = OpenVLAConfig(
-    model_path=args.model_path or model_cfg.get("path", "openvla/openvla-7b"),
-    unnorm_key=model_cfg.get("unnorm_key", "bridge_orig"),
-    prompt_template=model_cfg.get("prompt_template", "In: {instruction}\nOut:"),
-    image_size=model_cfg.get("image_size", 224),
-    dtype=model_cfg.get("dtype", "bfloat16"),
-    load_in_4bit=model_cfg.get("load_in_4bit", True),
-    position_scale=action_cfg.get("position_scale", 1.0),
-    rotation_scale=action_cfg.get("rotation_scale", 1.0),
-    gripper_threshold=action_cfg.get("gripper_threshold", 0.5),
-)
+vla_config = build_openvla_config(args.vla_config, model_path=args.model_path)
 
 physics_cfg = sim_cfg.get("physics", {})
 camera_cfg = sim_cfg.get("camera", {})
@@ -120,7 +115,7 @@ world.scene.add_default_ground_plane()
 # Import SO-100 directly from URDF onto the live stage (resolves mesh refs)
 urdf_path = os.path.join(project_root, robot_cfg.get("urdf_path", "assets/so100/so100.urdf"))
 robot_prim_path = robot_cfg.get("prim_path", "/World/SO100")
-robot_position = np.array(robot_cfg.get("position", [0.0, 0.0, 0.40]))
+robot_position = np.array(robot_cfg.get("position", [0.0, 0.0, 0.42]))
 robot_orientation = np.array(robot_cfg.get("orientation", [1.0, 0.0, 0.0, 0.0]))
 
 if not os.path.exists(urdf_path):
@@ -146,13 +141,15 @@ status, robot_prim = omni.kit.commands.execute(
     dest_path="",
 )
 log(f"[SO100] URDF imported, prim: {robot_prim}")
+# URDF import lands the articulation at /so_arm100 with an authored root translate of zero.
+# Write the root xform on that imported prim directly so the Property panel reflects the
+# actual robot placement instead of showing a misleading 0,0,0 transform.
+author_root_pose(world.stage, robot_prim, robot_position, robot_orientation)
 
 so100 = world.scene.add(
     Robot(
         prim_path=robot_prim,
         name="so100",
-        position=robot_position,
-        orientation=robot_orientation,
     )
 )
 
@@ -161,6 +158,20 @@ if table_cfg.get("enabled", False):
     table_pos = table_cfg.get("position", [0.0, 0.0, 0.25])
     table_size = table_cfg.get("size", [0.5, 0.5, 0.5])
     table_color = table_cfg.get("color", [0.4, 0.3, 0.2])
+    table_top_z = float(table_pos[2] + table_size[2] * 0.5)
+    clearance = float(robot_position[2] - table_top_z)
+    if clearance <= 0.0:
+        log(
+            "[SO100] WARNING: robot base z is at or below the tabletop top surface "
+            f"(robot_z={float(robot_position[2]):.3f}, table_top_z={table_top_z:.3f}, "
+            f"clearance={clearance:.3f})."
+        )
+    else:
+        log(
+            "[SO100] Table clearance check passed: "
+            f"robot_z={float(robot_position[2]):.3f}, table_top_z={table_top_z:.3f}, "
+            f"clearance={clearance:.3f}"
+        )
     world.scene.add(
         FixedCuboid(
             prim_path=table_cfg.get("prim_path", "/World/Table"),
