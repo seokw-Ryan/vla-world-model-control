@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import argparse
 
-from isaaclab_arena_vla.utils import (
+from vla_world_model_control.shared import (
     add_project_root_to_sys_path,
     build_openvla_config,
     load_yaml,
@@ -54,7 +54,7 @@ from isaacsim.sensors.camera import Camera
 from isaacsim.robot.manipulators.examples.franka import Franka, KinematicsSolver
 
 project_root = add_project_root_to_sys_path()
-from src.models.vla import OpenVLAWrapper
+from vla_world_model_control.shared import OpenVLAWrapper
 
 # ─── Phase 4: Load configs ──────────────────────────────────────────────────
 

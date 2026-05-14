@@ -8,7 +8,6 @@ from .paths import resolve_project_path
 
 
 def load_yaml(path: str) -> dict[str, Any]:
-    """Load a YAML file from an absolute or repo-relative path."""
     import yaml
 
     resolved = resolve_project_path(path)
@@ -21,8 +20,7 @@ def build_openvla_config(
     *,
     model_path: str | None = None,
 ):
-    """Build an ``OpenVLAConfig`` instance from the shared YAML format."""
-    from src.models.vla import OpenVLAConfig
+    from .openvla_wrapper import OpenVLAConfig
 
     vla_yaml = load_yaml(config_path)
     model_cfg = vla_yaml.get("model", {})

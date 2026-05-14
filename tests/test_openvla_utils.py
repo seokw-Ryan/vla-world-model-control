@@ -2,16 +2,21 @@ from __future__ import annotations
 
 import unittest
 
-from isaaclab_arena_vla.utils.openvla import build_openvla_config, load_yaml
-from isaaclab_arena_vla.utils.paths import PROJECT_ROOT
+from vla_world_model_control.shared.openvla import build_openvla_config, load_yaml
+from vla_world_model_control.shared.paths import PROJECT_ROOT
 
 try:
     import yaml  # noqa: F401
 except ImportError:  # pragma: no cover
     yaml = None
 
+try:
+    import numpy  # noqa: F401
+except ImportError:  # pragma: no cover
+    numpy = None
 
-@unittest.skipIf(yaml is None, "PyYAML is not installed in the active interpreter")
+
+@unittest.skipIf(yaml is None or numpy is None, "PyYAML or numpy is not installed in the active interpreter")
 class OpenVLAUtilsTest(unittest.TestCase):
     def test_load_yaml_resolves_repo_relative_path(self) -> None:
         config = load_yaml("configs/vla/openvla_default.yaml")

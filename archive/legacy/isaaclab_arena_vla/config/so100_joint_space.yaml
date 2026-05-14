@@ -1,0 +1,48 @@
+# SO-100 Joint Space Configuration for IsaacLab Arena
+# 6 DOF: 5 arm joints + 1 gripper
+
+joints:
+  - name: shoulder_pan
+    type: revolute
+    lower: -2.0
+    upper: 2.0
+    default: 0.0
+
+  - name: shoulder_lift
+    type: revolute
+    lower: 0.0
+    upper: 3.5
+    default: 1.0
+
+  - name: elbow_flex
+    type: revolute
+    lower: -3.14158
+    upper: 0.0
+    default: -1.0
+
+  - name: wrist_flex
+    type: revolute
+    lower: -2.5
+    upper: 1.2
+    default: -0.5
+
+  - name: wrist_roll
+    type: revolute
+    lower: -3.14158
+    upper: 3.14158
+    default: 0.0
+
+  - name: gripper
+    type: revolute
+    lower: -0.1
+    upper: 1.5
+    default: 0.5
+
+arm_joints: [shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll]
+gripper_joints: [gripper]
+
+control:
+  type: joint_position
+  frequency_hz: 5
+  physics_dt: 0.016667  # 1/60
+  control_decimation: 12

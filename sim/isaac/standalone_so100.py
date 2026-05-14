@@ -1,8 +1,8 @@
-"""Standalone Isaac Sim script for closed-loop VLA control of an SO-100 arm.
+"""Standalone Isaac Sim script for closed-loop SmolVLA control of an SO-100 arm.
 
 Usage:
-    <ISAAC_SIM>/python.sh sim/isaac/standalone_so100.py --headless --instruction "pick up the red cube"
-    <ISAAC_SIM>/python.sh sim/isaac/standalone_so100.py --max_steps 100
+    <ISAAC_SIM>/python.sh sim/isaac/standalone_so100.py --headless --task "pick up the red cube"
+    <ISAAC_SIM>/python.sh sim/isaac/standalone_so100.py --max_steps 100 --policy_path lerobot/smolvla_base
 
 IMPORTANT: Must be run with Isaac Sim's python.sh.
 SimulationApp must be created before any torch/omni imports.
@@ -11,10 +11,17 @@ SimulationApp must be created before any torch/omni imports.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
 
-from isaaclab_arena_vla.utils import (
+from vla_world_model_control.shared import (
+    PROJECT_ROOT,
+    add_lerobot_import_paths_to_sys_path,
     add_project_root_to_sys_path,
-    build_openvla_config,
     load_yaml,
     stderr_log as log,
 )
@@ -22,19 +29,31 @@ from isaaclab_arena_vla.utils import (
 
 # ─── Phase 1: Parse args (before SimulationApp) ─────────────────────────────
 
-parser = argparse.ArgumentParser(description="Standalone SO-100 VLA control in Isaac Sim")
+parser = argparse.ArgumentParser(description="Standalone SO-100 SmolVLA control in Isaac Sim")
 parser.add_argument("--headless", action="store_true", help="Run without GUI")
-parser.add_argument("--instruction", type=str, default="pick up the red cube",
-                    help="Natural language instruction for VLA")
+parser.add_argument("--task", "--instruction", dest="task", type=str,
+                    default="pick up the red cube",
+                    help="Natural language instruction passed to SmolVLA")
 parser.add_argument("--max_steps", type=int, default=200, help="Max control steps")
-parser.add_argument("--model_path", type=str, default=None,
-                    help="Override VLA model path")
-parser.add_argument("--vla_config", type=str,
-                    default="configs/vla/openvla_default.yaml",
-                    help="Path to VLA config YAML")
+parser.add_argument("--policy_path", type=str, default="lerobot/smolvla_base",
+                    help="SmolVLA checkpoint dir or HF repo id")
+parser.add_argument("--policy_device", type=str, default=None,
+                    help="Torch device for the policy (cuda / cpu). Default: policy config.")
 parser.add_argument("--sim_config", type=str,
                     default="configs/sim/so100_standalone.yaml",
                     help="Path to sim config YAML")
+parser.add_argument("--camera_eye", type=float, nargs=3, default=None,
+                    help="Optional camera eye override as x y z in world coordinates")
+parser.add_argument("--camera_target", type=float, nargs=3, default=None,
+                    help="Optional camera target override as x y z in world coordinates")
+parser.add_argument("--camera_orientation_wxyz", type=float, nargs=4, default=None,
+                    help="Optional camera orientation override as w x y z")
+parser.add_argument("--camera_focal_length", type=float, default=None,
+                    help="Optional focal length override")
+parser.add_argument("--log_dir", type=str, default=None,
+                    help="Per-step trace directory. Default: outputs/standalone_so100/<timestamp>")
+parser.add_argument("--trace_image_interval", type=int, default=1,
+                    help="Save the policy input image every N steps. 0 disables image dumps.")
 args = parser.parse_args()
 
 # ─── Phase 2: Create SimulationApp (must happen before any omni/torch imports)
@@ -46,19 +65,24 @@ simulation_app = SimulationApp({"headless": args.headless})
 # ─── Phase 3: Import everything else ────────────────────────────────────────
 
 import numpy as np
+import torch
 from pxr import Gf, UsdGeom
 from scipy.spatial.transform import Rotation
 
 from isaacsim.core.api import World
 from isaacsim.core.api.objects import DynamicCuboid, FixedCuboid
 from isaacsim.core.api.robots import Robot
+from isaacsim.core.utils.viewports import set_active_viewport_camera
 from isaacsim.sensors.camera import Camera
 from isaacsim.asset.importer.urdf import _urdf
 
 import omni.kit.commands
 
 project_root = add_project_root_to_sys_path()
-from src.models.vla import OpenVLAWrapper
+add_lerobot_import_paths_to_sys_path()
+
+from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+from transformers import AutoProcessor
 
 # ─── Phase 4: Load configs ──────────────────────────────────────────────────
 
@@ -84,7 +108,6 @@ def author_root_pose(stage, prim_path: str, position: np.ndarray, orientation_wx
     xform.AddScaleOp(precision=UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(1.0, 1.0, 1.0))
 
 sim_cfg = load_yaml(args.sim_config)
-vla_config = build_openvla_config(args.vla_config, model_path=args.model_path)
 
 physics_cfg = sim_cfg.get("physics", {})
 camera_cfg = sim_cfg.get("camera", {})
@@ -201,8 +224,16 @@ world.scene.add(
 
 # Camera
 cam_res = camera_cfg.get("resolution", [256, 256])
-cam_pos = camera_cfg.get("position", [0.25, 0.25, 0.9])
-cam_target = camera_cfg.get("target", [0.15, 0.0, 0.45])
+cam_pos = args.camera_eye if args.camera_eye is not None else camera_cfg.get("position", [0.25, 0.25, 0.9])
+cam_target = args.camera_target if args.camera_target is not None else camera_cfg.get("target", [0.15, 0.0, 0.45])
+cam_euler_deg = camera_cfg.get("orientation_euler_xyz_deg")
+if args.camera_orientation_wxyz is not None:
+    cam_orientation_wxyz = np.array(args.camera_orientation_wxyz, dtype=np.float32)
+elif camera_cfg.get("orientation_wxyz") is not None:
+    cam_orientation_wxyz = np.array(camera_cfg["orientation_wxyz"], dtype=np.float32)
+else:
+    cam_orientation_wxyz = None
+cam_focal_length = float(args.camera_focal_length or camera_cfg.get("focal_length", 1.5))
 camera = Camera(
     prim_path=camera_cfg.get("prim_path", "/World/Camera"),
     resolution=(cam_res[0], cam_res[1]),
@@ -213,23 +244,53 @@ camera = Camera(
 
 world.reset()
 camera.initialize()
-camera.set_focal_length(1.5)
+camera.set_focal_length(cam_focal_length)
 
-# Point camera at workspace
-cam_forward = np.array(cam_target) - np.array(cam_pos)
-cam_forward = cam_forward / np.linalg.norm(cam_forward)
-world_up = np.array([0.0, 0.0, 1.0])
-if abs(np.dot(cam_forward, world_up)) > 0.99:
-    world_up = np.array([0.0, 1.0, 0.0])
-cam_right = np.cross(cam_forward, world_up)
-cam_right = cam_right / np.linalg.norm(cam_right)
-cam_up = np.cross(cam_right, cam_forward)
-rot_matrix = np.stack([cam_right, cam_up, -cam_forward], axis=1)
-cam_rot = Rotation.from_matrix(rot_matrix)
-cam_quat_xyzw = cam_rot.as_quat()
-cam_quat_wxyz = np.array([cam_quat_xyzw[3], cam_quat_xyzw[0],
-                           cam_quat_xyzw[1], cam_quat_xyzw[2]])
-camera.set_world_pose(position=np.array(cam_pos), orientation=cam_quat_wxyz)
+
+def compute_lookat_quat(eye: np.ndarray, target: np.ndarray) -> np.ndarray:
+    """Compute wxyz quaternion in Isaac's world camera axes (+X forward, +Z up)."""
+    from isaacsim.core.utils.rotations import gf_quat_to_np_array, lookat_to_quatf
+
+    eye_gf = Gf.Vec3f(float(eye[0]), float(eye[1]), float(eye[2]))
+    target_gf = Gf.Vec3f(float(target[0]), float(target[1]), float(target[2]))
+    forward = target - eye
+    forward = forward / np.linalg.norm(forward)
+
+    up = Gf.Vec3f(0.0, 0.0, 1.0)
+    if abs(float(np.dot(forward, np.array([0.0, 0.0, 1.0])))) > 0.99:
+        up = Gf.Vec3f(0.0, 1.0, 0.0)
+    return gf_quat_to_np_array(lookat_to_quatf(target_gf, eye_gf, up)).astype(np.float32)
+
+
+def euler_xyz_deg_to_wxyz(euler_deg) -> np.ndarray:
+    """USD XYZ Euler degrees → wxyz quaternion (intrinsic XYZ, matches the Property panel)."""
+    rot = Rotation.from_euler("xyz", np.asarray(euler_deg, dtype=np.float64), degrees=True)
+    xyzw = rot.as_quat()
+    return np.array([xyzw[3], xyzw[0], xyzw[1], xyzw[2]], dtype=np.float32)
+
+
+if cam_orientation_wxyz is not None:
+    camera_orientation = cam_orientation_wxyz
+    camera_axes = "world"
+elif cam_euler_deg is not None:
+    camera_orientation = euler_xyz_deg_to_wxyz(cam_euler_deg)
+    camera_axes = "usd"
+else:
+    camera_orientation = compute_lookat_quat(
+        np.array(cam_pos, dtype=np.float32),
+        np.array(cam_target, dtype=np.float32),
+    )
+    camera_axes = "world"
+camera.set_world_pose(
+    position=np.array(cam_pos, dtype=np.float32),
+    orientation=camera_orientation,
+    camera_axes=camera_axes,
+)
+try:
+    set_active_viewport_camera(camera_cfg.get("prim_path", "/World/Camera"))
+    log(f"[SO100] Active viewport camera set to {camera_cfg.get('prim_path', '/World/Camera')}")
+except Exception as exc:
+    log(f"[SO100] Failed to switch active viewport camera: {exc}")
 
 # Initialize robot
 so100.initialize()
@@ -262,18 +323,47 @@ for _ in range(10):
 
 articulation_controller = so100.get_articulation_controller()
 
-# ─── Phase 8: Load VLA model ────────────────────────────────────────────────
+# ─── Phase 8: Load SmolVLA policy ──────────────────────────────────────────
 
 try:
-    vla = OpenVLAWrapper(vla_config).load()
-    log("[SO100] VLA model loaded.")
+    policy = SmolVLAPolicy.from_pretrained(args.policy_path)
+    device = torch.device(args.policy_device or policy.config.device)
+    policy.config.device = str(device)
+    policy.to(device)
+    policy.eval()
+    processor = AutoProcessor.from_pretrained(policy.config.vlm_model_name)
+    tokenizer = processor.tokenizer
+    log(f"[SO100] SmolVLA loaded from {args.policy_path} on {device}.")
 except Exception as e:
-    log(f"[SO100] VLA load FAILED: {type(e).__name__}: {e}")
+    log(f"[SO100] SmolVLA load FAILED: {type(e).__name__}: {e}")
     import traceback
     traceback.print_exc(file=sys.stderr)
     world.stop()
     simulation_app.close()
     sys.exit(1)
+
+task_text = args.task if args.task.endswith("\n") else f"{args.task}\n"
+tokenized = tokenizer(
+    [task_text],
+    return_tensors="pt",
+    padding="max_length",
+    truncation=True,
+    max_length=48,
+)
+task_tokens = tokenized["input_ids"].to(device)
+task_mask = tokenized["attention_mask"].to(device=device, dtype=torch.bool)
+policy.reset()
+
+# Discover which image observation keys this checkpoint expects (varies between
+# the base checkpoint, which uses camera1/2/3, and fine-tuned ones using "front").
+policy_image_keys = [
+    key for key in policy.config.input_features.keys()
+    if key.startswith("observation.images.")
+]
+if not policy_image_keys:
+    log("[SO100] WARNING: policy has no image input features; falling back to observation.images.front")
+    policy_image_keys = ["observation.images.front"]
+log(f"[SO100] Policy image keys: {policy_image_keys}")
 
 # ─── Phase 9: Warm-up ──────────────────────────────────────────────────────
 
@@ -287,49 +377,80 @@ for i in range(20):
 else:
     log("[SO100] WARNING: Camera did not return data during warm-up.")
 
-
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
-
-def vla_action_to_joint_deltas(action) -> tuple[np.ndarray, float]:
-    """Convert VLA 7D action (dx,dy,dz,drx,dry,drz,gripper) to SO-100 joint deltas.
-
-    The SO-100 uses direct joint position control (no IK). We map VLA's
-    cartesian deltas to joint-space deltas using a simple Jacobian-like mapping:
-
-    - action[0] (dx) -> shoulder_pan (base rotation)
-    - action[1] (dy) -> shoulder_lift
-    - action[2] (dz) -> elbow_flex
-    - action[3] (drx) -> wrist_flex
-    - action[4] (dry) -> wrist_roll
-    - action[5:6] ignored (extra rotation dims)
-    - action[6] -> gripper
-
-    Scale factors are applied to map VLA output range to reasonable joint deltas.
-    """
-    JOINT_DELTA_SCALE = 0.1  # scale VLA deltas to small joint movements
-
-    arm_deltas = np.zeros(NUM_ARM_JOINTS, dtype=np.float32)
-    arm_deltas[0] = action.delta_pos[0] * JOINT_DELTA_SCALE  # dx -> shoulder_pan
-    arm_deltas[1] = action.delta_pos[1] * JOINT_DELTA_SCALE  # dy -> shoulder_lift
-    arm_deltas[2] = action.delta_pos[2] * JOINT_DELTA_SCALE  # dz -> elbow_flex
-    arm_deltas[3] = action.delta_rot[0] * JOINT_DELTA_SCALE  # drx -> wrist_flex
-    arm_deltas[4] = action.delta_rot[1] * JOINT_DELTA_SCALE  # dry -> wrist_roll
-
-    gripper_val = action.gripper
-    return arm_deltas, gripper_val
-
+# SmolVLA outputs normalized actions in [-1, 1]; scale to small joint deltas.
+SIM_ARM_DELTA_SCALE = 0.1
+GRIPPER_OPEN = 1.5   # open position (radians)
+GRIPPER_CLOSED = -0.1  # closed position (radians)
 
 # Joint limits from URDF
 JOINT_LIMITS_LOWER = np.array([-2.0, 0.0, -3.14158, -2.5, -3.14158], dtype=np.float32)
 JOINT_LIMITS_UPPER = np.array([2.0, 3.5, 0.0, 1.2, 3.14158], dtype=np.float32)
-GRIPPER_OPEN = 1.5   # open position (radians)
-GRIPPER_CLOSED = -0.1  # closed position (radians)
 
-# ─── Phase 10: Control loop ─────────────────────────────────────────────────
 
-log(f"[SO100] Starting control loop: instruction='{args.instruction}', "
-    f"max_steps={args.max_steps}")
+def rgba_to_rgb_uint8(rgba: np.ndarray) -> np.ndarray:
+    rgb = rgba[:, :, :3]
+    if rgb.dtype != np.uint8:
+        rgb = (rgb * 255).astype(np.uint8) if rgb.max() <= 1.0 else rgb.astype(np.uint8)
+    return rgb
+
+
+def image_hash(rgb_uint8: np.ndarray) -> str:
+    return hashlib.md5(rgb_uint8.tobytes()).hexdigest()[:8]
+
+
+def build_policy_batch(rgb_uint8: np.ndarray, current_state: np.ndarray) -> dict[str, torch.Tensor]:
+    image_chw = np.transpose(rgb_uint8, (2, 0, 1))
+    image_tensor = torch.from_numpy(image_chw).float().unsqueeze(0).to(device) / 255.0
+    state_tensor = torch.from_numpy(current_state).float().unsqueeze(0).to(device)
+    batch: dict[str, torch.Tensor] = {
+        "observation.state": state_tensor,
+        "observation.language.tokens": task_tokens,
+        "observation.language.attention_mask": task_mask,
+    }
+    # The single physical camera is fed into every image slot the policy expects.
+    for key in policy_image_keys:
+        batch[key] = image_tensor
+    return batch
+
+
+# ─── Phase 10: Set up trace logging ────────────────────────────────────────
+
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+log_dir = Path(args.log_dir) if args.log_dir else PROJECT_ROOT / "outputs" / "standalone_so100" / timestamp
+log_dir.mkdir(parents=True, exist_ok=True)
+trace_path = log_dir / "step_trace.jsonl"
+image_dir = log_dir / "step_images" if args.trace_image_interval > 0 else None
+if image_dir is not None:
+    image_dir.mkdir(parents=True, exist_ok=True)
+trace_file = trace_path.open("w", encoding="utf-8")
+log(f"[SO100] Trace log: {trace_path}")
+if image_dir is not None:
+    log(f"[SO100] Step images: {image_dir} (every {args.trace_image_interval} step(s))")
+
+
+def save_image(rgb_uint8: np.ndarray, step_idx: int) -> str | None:
+    if image_dir is None:
+        return None
+    try:
+        from PIL import Image
+        path = image_dir / f"step{step_idx:05d}.png"
+        Image.fromarray(rgb_uint8, "RGB").save(path)
+        return str(path)
+    except Exception as exc:  # noqa: BLE001
+        log(f"[SO100] Image save failed at step {step_idx}: {exc}")
+        return None
+
+
+# ─── Phase 11: Control loop ────────────────────────────────────────────────
+
+log(
+    f"[SO100] Camera pose: eye={tuple(float(v) for v in cam_pos)}, "
+    f"orientation_wxyz={tuple(float(v) for v in camera_orientation)}, "
+    f"target={tuple(float(v) for v in cam_target)}, focal_length={cam_focal_length}"
+)
+log(f"[SO100] Starting control loop: task='{args.task}', max_steps={args.max_steps}")
 
 for step in range(args.max_steps):
     # 1. Capture camera image
@@ -337,50 +458,80 @@ for step in range(args.max_steps):
     if rgba is None:
         world.step(render=True)
         continue
-    rgb = (rgba[:, :, :3] * 255).astype(np.uint8) if rgba.max() <= 1.0 else rgba[:, :, :3].astype(np.uint8)
+    rgb = rgba_to_rgb_uint8(rgba)
+    img_hash = image_hash(rgb)
 
-    # 2. VLA inference
-    action = vla.predict(rgb, args.instruction)
-
-    # 3. Convert to joint deltas
-    arm_deltas, gripper_cmd = vla_action_to_joint_deltas(action)
-
-    # 4. Get current joint positions and apply deltas
+    # 2. Build state: 5 arm joints (radians) + 1 gripper (radians, sim range)
     current_joints = so100.get_joint_positions()
-    current_arm = current_joints[arm_joint_indices]
+    current_arm = np.array(current_joints[arm_joint_indices], dtype=np.float32)
+    current_gripper = float(current_joints[gripper_joint_idx]) if gripper_joint_idx is not None else 0.0
+    current_state = np.concatenate([current_arm, np.array([current_gripper], dtype=np.float32)])
 
-    target_arm = current_arm + arm_deltas
-    # Clamp to joint limits
-    target_arm = np.clip(target_arm, JOINT_LIMITS_LOWER, JOINT_LIMITS_UPPER)
+    # 3. SmolVLA inference
+    batch = build_policy_batch(rgb, current_state)
+    with torch.inference_mode():
+        action_tensor = policy.select_action(batch)
+    raw_action = action_tensor.squeeze(0).detach().cpu().numpy().astype(np.float32)
+    clipped_action = np.clip(raw_action, -1.0, 1.0)
 
-    # Gripper
-    gripper_target = GRIPPER_OPEN if gripper_cmd > 0.5 else GRIPPER_CLOSED
+    # 4. Map to joint deltas
+    arm_deltas = clipped_action[:NUM_ARM_JOINTS] * SIM_ARM_DELTA_SCALE
+    gripper_cmd = float(clipped_action[NUM_ARM_JOINTS]) if clipped_action.size > NUM_ARM_JOINTS else 0.0
+    gripper_target = GRIPPER_OPEN if gripper_cmd > 0.0 else GRIPPER_CLOSED
 
-    # 5. Build full joint target and apply
-    target_joints = current_joints.copy()
+    target_arm = np.clip(current_arm + arm_deltas, JOINT_LIMITS_LOWER, JOINT_LIMITS_UPPER)
+
+    target_joints = np.array(current_joints, dtype=np.float32, copy=True)
     target_joints[arm_joint_indices] = target_arm
     if gripper_joint_idx is not None:
         target_joints[gripper_joint_idx] = gripper_target
-
     so100.set_joint_positions(target_joints)
 
-    # 6. Step simulation (control decimation)
+    # 5. Step simulation (control decimation)
     for _ in range(CONTROL_DECIMATION):
         world.step(render=True)
 
-    # 7. Log step info
-    if step % 10 == 0:
-        log(f"[Step {step}] arm_deltas={arm_deltas}, "
-            f"gripper={'open' if gripper_cmd > 0.5 else 'closed'}, "
-            f"arm_pos={target_arm}")
+    # 6. Per-step trace logging
+    image_path = None
+    if image_dir is not None and (step % args.trace_image_interval == 0):
+        image_path = save_image(rgb, step)
+    trace_file.write(json.dumps({
+        "step": step,
+        "task": args.task,
+        "image_hash": img_hash,
+        "image_path": image_path,
+        "raw_action": raw_action.astype(float).tolist(),
+        "clipped_action": clipped_action.astype(float).tolist(),
+        "arm_deltas": arm_deltas.astype(float).tolist(),
+        "gripper_cmd": gripper_cmd,
+        "gripper_target": gripper_target,
+        "current_arm": current_arm.astype(float).tolist(),
+        "current_gripper": current_gripper,
+        "target_arm": target_arm.astype(float).tolist(),
+    }) + "\n")
+    trace_file.flush()
+
+    # 7. Stderr summary every 10 steps + step 0
+    if step == 0 or step % 10 == 0:
+        log(
+            f"[Step {step}] img={img_hash} raw_action={np.round(raw_action, 3).tolist()} "
+            f"arm_deltas={np.round(arm_deltas, 4).tolist()} "
+            f"gripper={'open' if gripper_cmd > 0.0 else 'closed'} "
+            f"target_arm={np.round(target_arm, 3).tolist()}"
+        )
 
     if simulation_app.is_running() is False:
         log("[SO100] SimulationApp closed by user.")
         break
 
-# ─── Phase 11: Shutdown ─────────────────────────────────────────────────────
+# ─── Phase 12: Shutdown ─────────────────────────────────────────────────────
 
 log("[SO100] Shutting down...")
+trace_file.close()
 world.stop()
-simulation_app.close()
 log("[SO100] Done.")
+# Isaac Sim 5.1 segfaults inside libomni.graph.core when SimulationApp.close()
+# tears down. Trace + images are already flushed, so skip the noisy shutdown.
+sys.stdout.flush()
+sys.stderr.flush()
+os._exit(0)

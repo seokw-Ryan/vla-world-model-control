@@ -1,0 +1,44 @@
+# PPO hyperparameters for SO-100 pick-and-place RL training
+# Uses IsaacLab Arena vectorized environment
+
+env:
+  num_envs: 4
+  enable_cameras: true       # RGB camera obs for vision policy
+  episode_length: 40.0       # seconds
+  rollout_steps: 200         # steps per rollout
+
+ppo:
+  total_timesteps: 500_000
+  lr: 3.0e-4
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_eps: 0.2
+  epochs_per_update: 4
+  mini_batch_size: 64
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+
+policy:
+  vision_backbone: "resnet18"
+  pretrained: true
+  state_hidden: 64
+  fusion_hidden: 256
+  actor_hidden: 128
+  init_log_std: -0.5
+
+reward:
+  use_dense: true
+  lift_weight: 2.0
+  success_bonus: 10.0
+
+checkpoint:
+  freq: 10_000
+  dir: "outputs/rl"
+
+logging:
+  freq: 1_000
+  wandb: false
+  wandb_project: "vla-rl"
+
+seed: 42

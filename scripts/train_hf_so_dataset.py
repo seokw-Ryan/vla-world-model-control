@@ -41,7 +41,7 @@ import os
 import shlex
 import subprocess
 
-from isaaclab_arena_vla.utils import (
+from vla_world_model_control.shared import (
     LEROBOT_SRC,
     PROJECT_ROOT,
     add_lerobot_import_paths_to_sys_path,

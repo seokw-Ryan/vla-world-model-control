@@ -16,17 +16,26 @@ robot:
     - wrist_flex
     - wrist_roll
     - gripper
-  # Default joint positions (radians) — neutral pose
+  # Default joint positions (radians) — neutral idle pose used on reset
   default_joint_positions: [0.0, 1.0, -1.0, -0.5, 0.0, 0.5]
-  # Base link sits on top of a thin tabletop
-  position: [0.0, 0.0, 0.40]
-  orientation: [1.0, 0.0, 0.0, 0.0]  # wxyz, identity
+  # Place the robot near the left table edge so its reachable workspace is on the table surface
+  # in front of the gripper instead of deep inside the table footprint.
+  # Keep z slightly ABOVE the tabletop top surface or the arm will spawn intersecting the table.
+  position: [-0.18, 0.0, 0.42]
+  # Rotate the base 90 degrees counterclockwise around +Z so the arm faces into the table workspace.
+  orientation: [0.7071068, 0.0, 0.0, 0.7071068]  # wxyz, +90 deg yaw
 
 camera:
   prim_path: "/World/Camera"
-  resolution: [256, 256]
-  position: [0.25, 0.25, 0.9]  # angled overhead (SO-100 workspace is smaller)
-  target: [0.15, 0.0, 0.45]   # look at the robot workspace on the tabletop
+  resolution: [640, 480]
+  # Camera placement captured from the Isaac Sim viewport (Property panel).
+  position: [-0.20951, 0.04278, 2.40000]
+  # Euler XYZ (degrees) — matches the "Orient" widget in the Property panel.
+  # Takes precedence over `target` look-at when provided.
+  orientation_euler_xyz_deg: [-1.368, -11.654, -96.742]
+  # Fallback target used only when no explicit orientation_euler_xyz_deg / orientation_wxyz is set.
+  target: [0.12, 0.0, 0.40]
+  focal_length: 15.0
 
 scene:
   table:
@@ -37,12 +46,23 @@ scene:
     color: [0.4, 0.3, 0.2]
   cube:
     prim_path: "/World/Cube"
-    position: [0.15, 0.0, 0.415]  # cube resting on the tabletop
+    # Place the default cube to the robot's left/front in the reachable tabletop workspace.
+    position: [-0.21, 0.14, 0.415]
+    orientation: [1.0, 0.0, 0.0, 0.0]  # reset to identity each episode
     size: 0.03  # slightly smaller cube for smaller arm
     color: [0.9, 0.1, 0.1]
     mass: 0.05
     lift_height: 0.48
     spawn:
-      radius: [0.10, 0.22]
-      angle_deg: [-90.0, 90.0]
+      # Sample uniformly from a rectangle on the tabletop:
+      # 1) start from the table top bounds,
+      # 2) inset by edge_margin + half cube width,
+      # 3) intersect that with a rectangle expressed in TABLE-local coordinates.
+      # This keeps cube placement tied to the table frame instead of the robot frame.
+      mode: tabletop_rect
+      edge_margin: 0.05
+      # Use a substantially larger table-frame box so resets vary meaningfully
+      # across the tabletop instead of collapsing into a narrow strip near the edge.
+      table_local_x: [-0.23, -0.18]
+      table_local_y: [0.10, 0.22]
       z: 0.415

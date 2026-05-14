@@ -38,10 +38,10 @@ import torch
 
 from omni.isaac.lab.envs import ManagerBasedRLEnv
 
-from isaaclab_arena_vla.utils import add_project_root_to_sys_path, build_openvla_config
+from vla_world_model_control.shared import add_project_root_to_sys_path, build_openvla_config
 
 project_root = add_project_root_to_sys_path()
-from src.models.vla import OpenVLAWrapper
+from vla_world_model_control.shared import OpenVLAWrapper
 from sim.isaac.lab_env.franka_vla_env_cfg import FrankaVLAEnvCfg
 
 # ─── Phase 4: Load VLA config ───────────────────────────────────────────────

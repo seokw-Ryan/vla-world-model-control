@@ -59,7 +59,18 @@ class OpenVLAWrapper:
     def load(self) -> "OpenVLAWrapper":
         """Load the model and processor onto the GPU. Call after SimulationApp init."""
         import torch
-        from transformers import AutoModelForVision2Seq, AutoProcessor
+        from transformers.generation import GenerationMixin
+        from transformers import AutoConfig, AutoProcessor, BitsAndBytesConfig
+        from transformers.dynamic_module_utils import get_class_from_dynamic_module
+        import transformers.tokenization_utils as tokenization_utils
+        import transformers.tokenization_utils_base as tokenization_utils_base
+
+        # OpenVLA's remote processor code expects these symbols under
+        # transformers.tokenization_utils, but Isaac Sim's bundled transformers
+        # exposes them from tokenization_utils_base instead.
+        for name in ("PaddingStrategy", "PreTokenizedInput", "TextInput", "TruncationStrategy"):
+            if not hasattr(tokenization_utils, name) and hasattr(tokenization_utils_base, name):
+                setattr(tokenization_utils, name, getattr(tokenization_utils_base, name))
 
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         dtype_map = {
@@ -76,17 +87,63 @@ class OpenVLAWrapper:
             self.config.model_path, trust_remote_code=True
         )
 
+        config = AutoConfig.from_pretrained(self.config.model_path, trust_remote_code=True)
+        if hasattr(config, "_attn_implementation"):
+            config._attn_implementation = "eager"
+
         model_kwargs = {
             "torch_dtype": torch_dtype,
             "trust_remote_code": True,
             "low_cpu_mem_usage": True,
+            "config": config,
         }
-        if self.config.load_in_4bit:
-            model_kwargs["load_in_4bit"] = True
+        if self._device == "cuda" and self.config.load_in_4bit:
+            model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=torch_dtype,
+            )
+            model_kwargs["device_map"] = "auto"
 
-        self._model = AutoModelForVision2Seq.from_pretrained(
+        class_ref = None
+        if hasattr(config, "auto_map") and isinstance(config.auto_map, dict):
+            class_ref = config.auto_map.get("AutoModelForVision2Seq")
+        if not class_ref:
+            raise ValueError(
+                "OpenVLA config is missing auto_map['AutoModelForVision2Seq']; "
+                "cannot resolve the remote model class in this transformers runtime."
+            )
+
+        model_class = get_class_from_dynamic_module(
+            class_ref,
+            self.config.model_path,
+            trust_remote_code=True,
+        )
+        # Isaac Sim bundles a newer transformers runtime than OpenVLA expects.
+        # Force eager attention and provide a safe class attribute so the parent
+        # PreTrainedModel init path does not touch the remote property's
+        # `self.language_model` before that field exists.
+        model_class._supports_sdpa = False
+        if not issubclass(model_class, GenerationMixin):
+            model_class = type(
+                model_class.__name__,
+                (model_class, GenerationMixin),
+                {},
+            )
+        if "recompute_mapping" not in getattr(model_class.tie_weights, "__code__", ()).co_varnames:
+            original_tie_weights = model_class.tie_weights
+
+            def compat_tie_weights(self, *args, **kwargs):
+                return original_tie_weights(self)
+
+            model_class.tie_weights = compat_tie_weights
+        self._model = model_class.from_pretrained(
             self.config.model_path, **model_kwargs
         )
+        if not getattr(self._model, "hf_device_map", None):
+            self._model = self._model.to(self._device)
+        self._model.eval()
 
         self._loaded = True
         print("[OpenVLA] Model loaded successfully.")

@@ -20,22 +20,18 @@ def _ensure_sys_path(path: Path) -> Path:
 
 
 def add_project_root_to_sys_path() -> Path:
-    """Ensure the repo root is importable."""
     return _ensure_sys_path(PROJECT_ROOT)
 
 
 def add_lerobot_import_paths_to_sys_path() -> tuple[Path, Path]:
-    """Ensure both the repo root and vendored LeRobot source tree are importable."""
     return add_project_root_to_sys_path(), _ensure_sys_path(LEROBOT_SRC)
 
 
 def project_path(*parts: str) -> Path:
-    """Build an absolute path rooted at the repository root."""
     return PROJECT_ROOT.joinpath(*parts)
 
 
 def resolve_project_path(pathlike: str | os.PathLike[str]) -> Path:
-    """Resolve an absolute path, or a repo-relative path when given a relative one."""
     path = Path(pathlike)
     if path.is_absolute():
         return path
@@ -46,7 +42,6 @@ def extend_pythonpath(
     env: Mapping[str, str] | None = None,
     *paths: str | os.PathLike[str],
 ) -> dict[str, str]:
-    """Return an env dict with the given paths prepended to PYTHONPATH."""
     base_env = dict(os.environ if env is None else env)
     extra_entries = [str(Path(path)) for path in paths]
     existing = base_env.get("PYTHONPATH")
@@ -57,6 +52,5 @@ def extend_pythonpath(
 
 
 def stderr_log(msg: str) -> None:
-    """Write a line to stderr."""
     sys.stderr.write(f"{msg}\n")
     sys.stderr.flush()

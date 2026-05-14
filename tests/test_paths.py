@@ -4,7 +4,7 @@ import os
 import sys
 import unittest
 
-from isaaclab_arena_vla.utils.paths import (
+from vla_world_model_control.shared.paths import (
     LEROBOT_SRC,
     PROJECT_ROOT,
     add_lerobot_import_paths_to_sys_path,
